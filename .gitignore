@@ -1,0 +1,19 @@
+# dependencias y artefactos
+node_modules/
+frontend/dist/
+bin/
+backend/tmp/
+# estado local / secretos
+.env
+.env.*
+!.env.example
+*.db
+*.db-wal
+*.db-shm
+*.mmdb
+data/geoip/*
+!data/geoip/README.txt
+# editores / SO
+.idea/
+.vscode/
+.DS_Store

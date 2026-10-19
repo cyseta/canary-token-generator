@@ -1,0 +1,24 @@
+# Overlay para publicar el stack SOLO a traves de Cloudflare Tunnel (el origen no queda expuesto).
+#   docker compose -f compose.yml -f cloudflared.compose.yml up -d     (requiere Docker Compose >= 2.24.4 por `!reset`)
+#
+# Importante:
+#  - El tunel solo reenvia HTTP(S). El honeypot MySQL (3306) NO pasa por el tunel: si lo necesitas, publica ese
+#    puerto en una IP publica del host y fija PUBLIC_MYSQL_HOST.
+#  - La IP del cliente llega en CF-Connecting-IP; tunnel.nginx la traslada a X-Forwarded-For y bloquea /admin.
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest # fija una version/digest concreta en tu despliegue
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:?define CLOUDFLARE_TUNNEL_TOKEN}
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    cap_drop: [ALL]
+    networks: [canary-net]
+    depends_on: [nginx]
+
+  nginx:
+    ports: !reset []            # el origen ya NO es accesible directamente desde Internet (se podria falsificar CF-Connecting-IP)
+    volumes:
+      - ./infra/nginx/tunnel.nginx:/etc/nginx/nginx.conf:ro

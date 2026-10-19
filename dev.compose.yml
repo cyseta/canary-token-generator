@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: canary
+      POSTGRES_PASSWORD: canary_dev_password
+      POSTGRES_DB: canary_dev
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata_dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U canary -d canary_dev"]
+      interval: 3s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "127.0.0.1:16686:16686" # Jaeger Web UI
+      - "127.0.0.1:4317:4317"   # OTLP gRPC receiver
+      - "127.0.0.1:4318:4318"   # OTLP HTTP receiver
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  backend:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.backend.dev
+    volumes:
+      - ./backend:/app
+      - go_pkg_cache:/go/pkg/mod
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:3306:3306"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      HTTP_PORT: 8080
+      MYSQL_PORT: 3306
+      BASE_URL: http://localhost:8080
+      DB_DRIVER: postgres
+      DB_DSN: postgres://canary:canary_dev_password@postgres:5432/canary_dev?sslmode=disable
+      REDIS_ADDR: redis:6379
+      # Sin token por defecto conocido: si ADMIN_TOKEN no se define, el backend genera uno aleatorio y lo muestra en el log.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      ALLOW_PRIVATE_WEBHOOKS: "true" # solo desarrollo: permite probar webhooks locales
+      RETENTION_DAYS: 30
+      DRAIN_DELAY: 500ms
+
+  frontend:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.frontend.dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./infra/nginx/dev.nginx:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+      - frontend
+
+volumes:
+  pgdata_dev:
+  go_pkg_cache:

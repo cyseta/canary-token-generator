@@ -1,0 +1,108 @@
+# Stack de produccion. NO contiene credenciales por defecto: copia .env.example a .env y rellena los valores.
+name: canary
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-canary}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD en .env (openssl rand -hex 24)}
+      POSTGRES_DB: ${POSTGRES_DB:-canary_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      # usa las MISMAS variables que el servicio (antes estaban fijas a canary/canary_db)
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks: [canary-net]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Solo guarda claves efimeras (deduplicado y rate limit): sin persistencia. Con contrasena.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?define REDIS_PASSWORD en .env (openssl rand -hex 24)}", "--save", "", "--appendonly", "no"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks: [canary-net]
+
+  backend:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.backend
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      APP_ENV: production
+      HTTP_PORT: 8080
+      MYSQL_PORT: 3306
+      BASE_URL: ${BASE_URL:?define BASE_URL en .env (URL publica, p.ej. https://canary.example.com)}
+      CORS_ALLOWED_ORIGINS: ${BASE_URL}
+      DB_DRIVER: postgres
+      # construido a partir de las mismas variables que usa el servicio postgres
+      DB_DSN: postgres://${POSTGRES_USER:-canary}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-canary_db}?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?define ADMIN_TOKEN en .env (openssl rand -hex 32)}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # nginx llega desde la red privada de Docker, por lo que sus cabeceras son de confianza.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      CLIENT_IP_HEADER: ${CLIENT_IP_HEADER:-x-forwarded-for}
+      PUBLIC_MYSQL_HOST: ${PUBLIC_MYSQL_HOST:-}
+      PUBLIC_MYSQL_PORT: ${PUBLIC_MYSQL_PORT:-3306}
+      GEOIP_PATH: /data/geoip/GeoLite2-City.mmdb
+    volumes:
+      - ./data/geoip:/data/geoip:ro # coloca aqui GeoLite2-City.mmdb (ver README); sin el, el enriquecimiento GeoIP queda desactivado
+    ports:
+      - "3306:3306" # honeypot MySQL (debe ser alcanzable por el atacante)
+    # Endurecimiento: sin root (USER en el Dockerfile), FS de solo lectura, sin capacidades, con limites.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 512
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    networks: [canary-net]
+
+  nginx:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.frontend
+    restart: unless-stopped
+    depends_on:
+      backend: { condition: service_healthy }
+    ports:
+      # Solo HTTP: este stack NO termina TLS. Ponlo detras de un balanceador/Cloudflare Tunnel con HTTPS
+      # (antes se publicaba el 443 sin que nginx escuchara en el, y todo el trafico iba en claro).
+      - "80:80"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID, NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    networks: [canary-net]
+
+networks:
+  canary-net:
+    driver: bridge
+
+volumes:
+  pgdata:
