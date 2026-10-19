@@ -1,0 +1,46 @@
+user nginx;
+worker_processes 1;
+error_log /var/log/nginx/error.log debug;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+
+    upstream dev_backend {
+        server backend:8080;
+    }
+
+    upstream dev_frontend {
+        server frontend:3000;
+    }
+
+    server {
+        listen 80;
+        server_name localhost;
+
+        # Proxy backend endpoints
+        location ~ ^/(api|t|r|f|k|healthz|admin)/? {
+            proxy_pass http://dev_backend;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+
+        # Proxy frontend Vite dev server with WebSocket HMR support
+        location / {
+            proxy_pass http://dev_frontend;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_read_timeout 86400;
+        }
+    }
+}
